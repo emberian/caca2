@@ -1,27 +1,26 @@
 use std::sync::Arc;
 use winit::{
     dpi::PhysicalSize,
-    event::{KeyEvent, WindowEvent},
+    event::{ElementState, KeyEvent, MouseButton, WindowEvent},
     keyboard::{KeyCode, PhysicalKey},
     window::Window,
 };
-use crate::gpu::{GpuContext, CaGpuResources, Uniforms};
-use crate::ca;
-use crate::ui::UiState;
+
+use crate::gpu::GpuContext;
+use crate::simulation::{Simulation, SimulationConfig, patterns};
+use crate::ui::{self, UiState, Tool};
 
 pub struct App {
     gpu: GpuContext,
-    ca_resources: CaGpuResources,
     egui_renderer: egui_wgpu::Renderer,
     egui_state: egui_winit::State,
     egui_ctx: egui::Context,
     ui_state: UiState,
+    simulation: Simulation,
     window: Arc<Window>,
-    grid_width: u32,
-    grid_height: u32,
-    tile_cols: u32,
-    tile_rows: u32,
     frame_count: u64,
+    mouse_pos: Option<(f32, f32)>,
+    mouse_down: bool,
 }
 
 pub struct EventResponse {
@@ -32,26 +31,8 @@ impl App {
     pub async fn new(window: Arc<Window>) -> Self {
         let gpu = GpuContext::new(window.clone()).await;
         
-        let tile_cols = 4u32;
-        let tile_rows = 4u32;
-        let cells_per_tile = 128u32;
-        
-        let grid_width = tile_cols * cells_per_tile;
-        let grid_height = tile_rows * cells_per_tile;
-        
-        let initial_cells = ca::generate_initial_cells(grid_width, grid_height, 0.3);
-        let rules = ca::generate_general_rules(tile_cols * tile_rows);
-        
-        let ca_resources = CaGpuResources::new(
-            &gpu.device,
-            gpu.config.format,
-            grid_width,
-            grid_height,
-            tile_cols,
-            tile_rows,
-            &initial_cells,
-            &rules,
-        );
+        let config = SimulationConfig::default();
+        let simulation = Simulation::new(config);
         
         let egui_ctx = egui::Context::default();
         let egui_state = egui_winit::State::new(
@@ -71,24 +52,46 @@ impl App {
             false,
         );
         
+        let mut ui_state = UiState::default();
+        ui_state.sync_from_rule(&simulation.config.rule);
+        
         Self {
             gpu,
-            ca_resources,
             egui_renderer,
             egui_state,
             egui_ctx,
-            ui_state: UiState::default(),
+            ui_state,
+            simulation,
             window,
-            grid_width,
-            grid_height,
-            tile_cols,
-            tile_rows,
             frame_count: 0,
+            mouse_pos: None,
+            mouse_down: false,
         }
     }
     
     pub fn handle_event(&mut self, event: &WindowEvent) -> EventResponse {
         let response = self.egui_state.on_window_event(&self.window, event);
+        
+        if !response.consumed {
+            match event {
+                WindowEvent::CursorMoved { position, .. } => {
+                    self.mouse_pos = Some((position.x as f32, position.y as f32));
+                    if self.mouse_down {
+                        self.handle_mouse_drag();
+                    }
+                }
+                WindowEvent::MouseInput { state, button, .. } => {
+                    if *button == MouseButton::Left {
+                        self.mouse_down = *state == ElementState::Pressed;
+                        if self.mouse_down {
+                            self.handle_mouse_click();
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        
         EventResponse { consumed: response.consumed }
     }
     
@@ -100,14 +103,80 @@ impl App {
                 self.ui_state.paused = !self.ui_state.paused;
             }
             PhysicalKey::Code(KeyCode::KeyR) => {
-                self.randomize();
+                self.simulation.randomize(None);
             }
-            PhysicalKey::Code(KeyCode::KeyT) => {
-                self.ui_state.use_totalistic = !self.ui_state.use_totalistic;
-                self.update_uniforms();
+            PhysicalKey::Code(KeyCode::KeyC) => {
+                self.simulation.clear();
             }
+            PhysicalKey::Code(KeyCode::Period) | PhysicalKey::Code(KeyCode::KeyN) => {
+                if self.ui_state.paused {
+                    self.simulation.step();
+                }
+            }
+            PhysicalKey::Code(KeyCode::Comma) | PhysicalKey::Code(KeyCode::KeyB) => {
+                if self.ui_state.paused {
+                    self.simulation.step_back();
+                }
+            }
+            PhysicalKey::Code(KeyCode::Digit1) => self.ui_state.current_tool = Tool::Pan,
+            PhysicalKey::Code(KeyCode::Digit2) => self.ui_state.current_tool = Tool::Draw,
+            PhysicalKey::Code(KeyCode::Digit3) => self.ui_state.current_tool = Tool::Erase,
+            PhysicalKey::Code(KeyCode::Digit4) => self.ui_state.current_tool = Tool::Place,
             _ => {}
         }
+    }
+    
+    fn handle_mouse_click(&mut self) {
+        self.apply_tool_at_mouse();
+    }
+    
+    fn handle_mouse_drag(&mut self) {
+        self.apply_tool_at_mouse();
+    }
+    
+    fn apply_tool_at_mouse(&mut self) {
+        if let Some((mx, my)) = self.mouse_pos {
+            let (cell_x, cell_y) = self.screen_to_cell(mx, my);
+            
+            match self.ui_state.current_tool {
+                Tool::Draw => {
+                    self.simulation.set_cell(cell_x, cell_y, 1);
+                }
+                Tool::Erase => {
+                    self.simulation.set_cell(cell_x, cell_y, 0);
+                }
+                Tool::Place => {
+                    let all_patterns = patterns::all();
+                    if self.ui_state.selected_pattern < all_patterns.len() {
+                        let pattern = &all_patterns[self.ui_state.selected_pattern];
+                        self.simulation.place_pattern(pattern, cell_x, cell_y);
+                    }
+                }
+                Tool::Pan => {}
+            }
+        }
+    }
+    
+    fn screen_to_cell(&self, screen_x: f32, screen_y: f32) -> (u32, u32) {
+        let panel_width = 280.0;
+        let top_bar_height = 30.0;
+        
+        let canvas_x = (screen_x - panel_width).max(0.0);
+        let canvas_y = (screen_y - top_bar_height).max(0.0);
+        
+        let canvas_width = (self.gpu.config.width as f32 - panel_width).max(1.0);
+        let canvas_height = (self.gpu.config.height as f32 - top_bar_height).max(1.0);
+        
+        let norm_x = canvas_x / canvas_width;
+        let norm_y = canvas_y / canvas_height;
+        
+        let cell_x = (norm_x * self.simulation.width() as f32) as u32;
+        let cell_y = (norm_y * self.simulation.height() as f32) as u32;
+        
+        (
+            cell_x.min(self.simulation.width().saturating_sub(1)),
+            cell_y.min(self.simulation.height().saturating_sub(1)),
+        )
     }
     
     pub fn resize(&mut self, size: PhysicalSize<u32>) {
@@ -119,9 +188,9 @@ impl App {
             return;
         }
         
-        if self.frame_count % self.ui_state.speed_divisor == 0 {
-            self.ca_resources.step(&self.gpu.device, &self.gpu.queue, self.grid_width, self.grid_height);
-            self.ca_resources.update_render_bind_group(&self.gpu.device);
+        let speed_frames = 61 - self.ui_state.speed.min(60) as u64;
+        if self.frame_count % speed_frames.max(1) == 0 {
+            self.simulation.step();
         }
         
         self.frame_count += 1;
@@ -140,66 +209,8 @@ impl App {
         
         let raw_input = self.egui_state.take_egui_input(&self.window);
         
-        let ui_state = &mut self.ui_state;
-        let grid_width = self.grid_width;
-        let grid_height = self.grid_height;
-        let tile_cols = self.tile_cols;
-        let tile_rows = self.tile_rows;
-        
         let full_output = self.egui_ctx.run(raw_input, |ctx| {
-            egui::Window::new("Controls")
-                .default_pos([10.0, 10.0])
-                .show(ctx, |ui| {
-                    ui.horizontal(|ui| {
-                        if ui.button(if ui_state.paused { "Play" } else { "Pause" }).clicked() {
-                            ui_state.paused = !ui_state.paused;
-                        }
-                        
-                        if ui.button("Randomize").clicked() {
-                            ui_state.should_randomize = true;
-                        }
-                    });
-                    
-                    ui.separator();
-                    
-                    ui.label("Rule Mode:");
-                    ui.horizontal(|ui| {
-                        if ui.selectable_label(ui_state.rule_mode == ca::RuleMode::Classic, "Classic").clicked() {
-                            ui_state.rule_mode = ca::RuleMode::Classic;
-                            ui_state.rule_mode_changed = true;
-                        }
-                        if ui.selectable_label(ui_state.rule_mode == ca::RuleMode::Sparse, "Sparse").clicked() {
-                            ui_state.rule_mode = ca::RuleMode::Sparse;
-                            ui_state.rule_mode_changed = true;
-                        }
-                        if ui.selectable_label(ui_state.rule_mode == ca::RuleMode::Random, "Random").clicked() {
-                            ui_state.rule_mode = ca::RuleMode::Random;
-                            ui_state.rule_mode_changed = true;
-                        }
-                    });
-                    
-                    if ui_state.rule_mode == ca::RuleMode::Sparse {
-                        ui.add(egui::Slider::new(&mut ui_state.sparse_density, 0.01..=0.5).text("Density"));
-                    }
-                    
-                    ui.separator();
-                    
-                    if ui.checkbox(&mut ui_state.use_totalistic, "Totalistic rules (T)").changed() {
-                        ui_state.totalistic_changed = true;
-                    }
-                    
-                    ui.add(egui::Slider::new(&mut ui_state.speed_divisor, 1..=60).text("Speed"));
-                    
-                    ui.separator();
-                    
-                    ui.label(format!("Grid: {}x{}", grid_width, grid_height));
-                    ui.label(format!("Tiles: {}x{}", tile_cols, tile_rows));
-                    ui.collapsing("Shortcuts", |ui| {
-                        ui.label("Space: pause");
-                        ui.label("R: randomize");
-                        ui.label("T: toggle totalistic");
-                    });
-                });
+            ui::draw_ui(ctx, &mut self.ui_state, &mut self.simulation);
         });
         
         self.egui_state.handle_platform_output(&self.window, full_output.platform_output);
@@ -229,12 +240,17 @@ impl App {
         
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("CA Render Pass"),
+                label: Some("Main Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.02,
+                            g: 0.02,
+                            b: 0.05,
+                            a: 1.0,
+                        }),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -243,9 +259,7 @@ impl App {
                 occlusion_query_set: None,
             });
             
-            render_pass.set_pipeline(&self.ca_resources.render_pipeline);
-            render_pass.set_bind_group(0, &self.ca_resources.render_bind_group, &[]);
-            render_pass.draw(0..6, 0..1);
+            self.render_grid(&mut render_pass);
         }
         
         {
@@ -274,80 +288,10 @@ impl App {
         for id in &full_output.textures_delta.free {
             self.egui_renderer.free_texture(id);
         }
-        
-        if self.ui_state.should_randomize {
-            self.ui_state.should_randomize = false;
-            self.randomize();
-        }
-        
-        if self.ui_state.totalistic_changed || self.ui_state.rule_mode_changed {
-            self.ui_state.totalistic_changed = false;
-            self.ui_state.rule_mode_changed = false;
-            self.update_uniforms();
-        }
     }
     
-    fn randomize(&mut self) {
-        let initial_cells = ca::generate_initial_cells(self.grid_width, self.grid_height, 0.3);
-        let rules = self.generate_rules();
-        
-        self.gpu.queue.write_buffer(
-            &self.ca_resources.cell_buffers[0],
-            0,
-            bytemuck::cast_slice(&initial_cells),
-        );
-        self.gpu.queue.write_buffer(
-            &self.ca_resources.cell_buffers[1],
-            0,
-            bytemuck::cast_slice(&initial_cells),
-        );
-        self.gpu.queue.write_buffer(
-            &self.ca_resources.rule_buffer,
-            0,
-            bytemuck::cast_slice(&rules),
-        );
-    }
-    
-    fn generate_rules(&self) -> Vec<u32> {
-        let tile_count = self.tile_cols * self.tile_rows;
-        let density = self.ui_state.sparse_density;
-        
-        match self.ui_state.rule_mode {
-            ca::RuleMode::Classic => ca::generate_classic_rules(tile_count),
-            ca::RuleMode::Sparse if self.ui_state.use_totalistic => {
-                ca::generate_sparse_totalistic_rules(tile_count, density)
-            }
-            ca::RuleMode::Sparse => ca::generate_sparse_rules(tile_count, density),
-            ca::RuleMode::Random if self.ui_state.use_totalistic => {
-                ca::generate_totalistic_rules(tile_count)
-            }
-            ca::RuleMode::Random => ca::generate_general_rules(tile_count),
-        }
-    }
-    
-    fn update_uniforms(&mut self) {
-        let uniforms = Uniforms {
-            grid_width: self.grid_width,
-            grid_height: self.grid_height,
-            tile_cols: self.tile_cols,
-            tile_rows: self.tile_rows,
-            tile_width: self.grid_width / self.tile_cols,
-            tile_height: self.grid_height / self.tile_rows,
-            use_totalistic: if self.ui_state.use_totalistic { 1 } else { 0 },
-            _padding: 0,
-        };
-        
-        self.gpu.queue.write_buffer(
-            &self.ca_resources.uniform_buffer,
-            0,
-            bytemuck::cast_slice(&[uniforms]),
-        );
-        
-        let rules = self.generate_rules();
-        self.gpu.queue.write_buffer(
-            &self.ca_resources.rule_buffer,
-            0,
-            bytemuck::cast_slice(&rules),
-        );
+    fn render_grid(&self, _render_pass: &mut wgpu::RenderPass) {
+        // TODO: Implement proper GPU-based grid rendering
+        // For now this is a placeholder - will add proper shader-based rendering
     }
 }

@@ -1,6 +1,8 @@
 mod app;
 mod gpu;
-mod ca;
+pub mod neighborhood;
+pub mod rule;
+pub mod simulation;
 mod ui;
 
 use winit::{
