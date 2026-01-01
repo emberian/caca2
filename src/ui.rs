@@ -25,6 +25,7 @@ pub struct UiState {
     pub speed: u32,
     pub current_tool: Tool,
     pub active_panel: Option<Panel>,
+    pub side_panel_collapsed: bool,
 
     pub rule_input: String,
     pub rule_parse_error: Option<String>,
@@ -85,6 +86,7 @@ impl Default for UiState {
             speed: 10,
             current_tool: Tool::Draw,
             active_panel: Some(Panel::Rules),
+            side_panel_collapsed: false,
 
             rule_input: "B3/S23".into(),
             rule_parse_error: None,
@@ -104,7 +106,7 @@ impl Default for UiState {
             show_stats_overlay: true,
             color_scheme: ColorScheme::Classic,
 
-            spacetime_slice_y: 128,
+            spacetime_slice_y: 64,
             spacetime_history: Vec::new(),
             spacetime_max_history: 200,
 
@@ -117,8 +119,8 @@ impl Default for UiState {
 
             seed_input: "0".into(),
             density_input: 0.3,
-            grid_width_input: 256,
-            grid_height_input: 256,
+            grid_width_input: 128,
+            grid_height_input: 128,
         }
     }
 }
@@ -267,10 +269,28 @@ fn draw_top_bar(ctx: &egui::Context, ui_state: &mut UiState, sim: &mut Simulatio
 }
 
 fn draw_side_panel(ctx: &egui::Context, ui_state: &mut UiState, sim: &mut Simulation) {
+    if ui_state.side_panel_collapsed {
+        egui::SidePanel::left("side_panel_collapsed")
+            .exact_width(24.0)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.vertical_centered(|ui| {
+                    if ui.button("▶").on_hover_text("Expand panel").clicked() {
+                        ui_state.side_panel_collapsed = false;
+                    }
+                });
+            });
+        return;
+    }
+
     egui::SidePanel::left("side_panel")
         .default_width(280.0)
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
+                if ui.button("◀").on_hover_text("Collapse panel").clicked() {
+                    ui_state.side_panel_collapsed = true;
+                }
+                ui.separator();
                 ui.selectable_value(&mut ui_state.active_panel, Some(Panel::Rules), "Rules");
                 ui.selectable_value(
                     &mut ui_state.active_panel,

@@ -20,8 +20,8 @@ pub struct SimulationConfig {
 impl Default for SimulationConfig {
     fn default() -> Self {
         Self {
-            width: 256,
-            height: 256,
+            width: 128,
+            height: 128,
             rule: crate::rule::catalog::game_of_life(),
             neighborhood: Neighborhood::moore(),
             boundary: BoundaryCondition::Toroidal,
