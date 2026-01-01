@@ -58,14 +58,46 @@ async fn run() {
     #[cfg(target_arch = "wasm32")]
     {
         use winit::dpi::PhysicalSize;
+        let web_window = web_sys::window().unwrap();
+        let dpr = web_window.device_pixel_ratio();
+        let width = web_window.inner_width().unwrap().as_f64().unwrap();
+        let height = web_window.inner_height().unwrap().as_f64().unwrap();
         let _ = window.request_inner_size(PhysicalSize::new(
-            web_sys::window().unwrap().inner_width().unwrap().as_f64().unwrap() as u32,
-            web_sys::window().unwrap().inner_height().unwrap().as_f64().unwrap() as u32,
+            (width * dpr) as u32,
+            (height * dpr) as u32,
         ));
     }
     
     let window = std::sync::Arc::new(window);
     let mut app = App::new(window.clone()).await;
+    
+    #[cfg(target_arch = "wasm32")]
+    {
+        use wasm_bindgen::prelude::*;
+        use wasm_bindgen::JsCast;
+        
+        let window_clone = window.clone();
+        let resize_closure = Closure::<dyn Fn()>::new(move || {
+            let web_window = web_sys::window().unwrap();
+            let dpr = web_window.device_pixel_ratio();
+            let width = web_window.inner_width().unwrap().as_f64().unwrap();
+            let height = web_window.inner_height().unwrap().as_f64().unwrap();
+            let _ = window_clone.request_inner_size(PhysicalSize::new(
+                (width * dpr) as u32,
+                (height * dpr) as u32,
+            ));
+        });
+        
+        let web_window = web_sys::window().unwrap();
+        web_window
+            .add_event_listener_with_callback("resize", resize_closure.as_ref().unchecked_ref())
+            .unwrap();
+        web_window
+            .add_event_listener_with_callback("orientationchange", resize_closure.as_ref().unchecked_ref())
+            .unwrap();
+        
+        resize_closure.forget();
+    }
     
     event_loop.run(move |event, target| {
         match event {
